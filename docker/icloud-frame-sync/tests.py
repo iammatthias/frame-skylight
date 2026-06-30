@@ -26,7 +26,7 @@ class TestAlbumParsing(unittest.TestCase):
         for url, want in cases.items():
             self.assertEqual(icloud_album.token_from_url(url), want, url)
 
-    def test_photo_from_master(self):
+    def test_asset_from_master_photo(self):
         m = {
             "recordType": "CPLMaster",
             "recordName": "Ah7p/x:1",
@@ -37,19 +37,84 @@ class TestAlbumParsing(unittest.TestCase):
                 "filenameEnc": {"value": base64.b64encode(b"My Photo.JPG").decode()},
             },
         }
-        p = icloud_album.photo_from_master(m)
+        p = icloud_album.asset_from_master(m)
+        self.assertEqual(p["kind"], "photo")
         self.assertEqual(p["guid"], "Ah7p/x:1")
         self.assertEqual(p["filename"], "My Photo.JPG")
         self.assertEqual((p["width"], p["height"]), (1620, 1080))
+        self.assertEqual(p["poster_url"], "")
         # ${f} replaced with the URL-encoded filename.
         self.assertIn("My%20Photo.JPG", p["url"])
         self.assertNotIn("${f}", p["url"])
 
-    def test_photo_from_master_skips(self):
+    def test_asset_from_master_skips(self):
         # Non-master records and masters without a download URL are skipped.
-        self.assertIsNone(icloud_album.photo_from_master({"recordType": "CPLAsset"}))
-        self.assertIsNone(icloud_album.photo_from_master(
+        self.assertIsNone(icloud_album.asset_from_master({"recordType": "CPLAsset"}))
+        self.assertIsNone(icloud_album.asset_from_master(
             {"recordType": "CPLMaster", "recordName": "x", "fields": {}}))
+
+    @staticmethod
+    def _video_master(med=True, poster=True):
+        # Mirrors a real iCloud video CPLMaster: a quicktime itemType, the huge
+        # original we must ignore, H.264 mp4 derivatives, and JPEG posters.
+        f = {
+            "filenameEnc": {"value": base64.b64encode(b"IMG_1.MOV").decode()},
+            "itemType": {"value": "com.apple.quicktime-movie"},
+            "resOriginalFileType": {"value": "com.apple.quicktime-movie"},
+            "resOriginalRes": {"value": {"downloadURL": "https://x/ORIGINAL/${f}"}},
+            "resVidSmallRes": {"value": {"downloadURL": "https://x/SMALL/${f}"}},
+            "resVidSmallWidth": {"value": 360}, "resVidSmallHeight": {"value": 640},
+            "resJPEGThumbRes": {"value": {"downloadURL": "https://x/THUMB/${f}"}},
+        }
+        if med:
+            f["resVidMedRes"] = {"value": {"downloadURL": "https://x/MED/${f}"}}
+            f["resVidMedWidth"] = {"value": 720}
+            f["resVidMedHeight"] = {"value": 1280}
+        if poster:
+            f["resJPEGMedRes"] = {"value": {"downloadURL": "https://x/POSTER/${f}"}}
+        return {"recordType": "CPLMaster", "recordName": "vguid", "fields": f}
+
+    def test_asset_from_master_video_prefers_med(self):
+        v = icloud_album.asset_from_master(self._video_master())
+        self.assertEqual(v["kind"], "video")
+        self.assertEqual((v["width"], v["height"]), (720, 1280))
+        self.assertIn("/MED/", v["url"])
+        self.assertIn("public.mp4", v["url"])           # never the .MOV filename
+        self.assertNotIn("/ORIGINAL/", v["url"])        # the huge HEVC original is skipped
+        self.assertIn("/POSTER/", v["poster_url"])      # resJPEGMedRes still
+        self.assertIn("public.jpeg", v["poster_url"])
+        self.assertNotIn("${f}", v["url"] + v["poster_url"])
+
+    def test_asset_from_master_video_falls_back_to_small(self):
+        v = icloud_album.asset_from_master(self._video_master(med=False))
+        self.assertEqual(v["kind"], "video")
+        self.assertEqual((v["width"], v["height"]), (360, 640))
+        self.assertIn("/SMALL/", v["url"])
+
+    def test_asset_from_master_video_poster_optional(self):
+        v = icloud_album.asset_from_master(self._video_master(poster=False))
+        self.assertEqual(v["kind"], "video")
+        self.assertIn("/THUMB/", v["poster_url"])       # falls back to resJPEGThumbRes
+
+    def test_live_photo_stays_a_photo(self):
+        # A Live Photo is an image that also carries resVid* (its motion clip);
+        # it must sync as a still, using resOriginalRes -- not become a video.
+        m = {
+            "recordType": "CPLMaster", "recordName": "live1",
+            "fields": {
+                "itemType": {"value": "public.heic"},
+                "filenameEnc": {"value": base64.b64encode(b"IMG_9.HEIC").decode()},
+                "resOriginalRes": {"value": {"downloadURL": "https://x/STILL/${f}"}},
+                "resOriginalWidth": {"value": 4032}, "resOriginalHeight": {"value": 3024},
+                "resVidMedRes": {"value": {"downloadURL": "https://x/LIVEMOTION/${f}"}},
+                "resVidMedWidth": {"value": 1440}, "resVidMedHeight": {"value": 1080},
+            },
+        }
+        p = icloud_album.asset_from_master(m)
+        self.assertEqual(p["kind"], "photo")
+        self.assertIn("/STILL/", p["url"])
+        self.assertNotIn("/LIVEMOTION/", p["url"])
+        self.assertEqual(p["poster_url"], "")
 
 
 class TestAlbumPagination(unittest.TestCase):
@@ -84,9 +149,9 @@ class TestAlbumPagination(unittest.TestCase):
         finally:
             icloud_album._query, icloud_album._resolve = orig_q, orig_r
 
-        self.assertEqual(len(album["photos"]), TOTAL)            # not 50
-        self.assertEqual(album["photos"][0]["guid"], "guid-0000")
-        self.assertEqual(album["photos"][-1]["guid"], f"guid-{TOTAL - 1:04d}")  # newest present
+        self.assertEqual(len(album["assets"]), TOTAL)            # not 50
+        self.assertEqual(album["assets"][0]["guid"], "guid-0000")
+        self.assertEqual(album["assets"][-1]["guid"], f"guid-{TOTAL - 1:04d}")  # newest present
 
 
 class TestFrameSQL(unittest.TestCase):
@@ -120,11 +185,42 @@ class TestFrameSQL(unittest.TestCase):
         self.assertIn("200", sql)                 # height
         self.assertIn("100", sql)                 # width
 
-    def test_remove_deletes_row_and_file(self):
+    def test_remove_deletes_row_and_all_files(self):
         self.frame.remove_asset("ic-x")
         joined = " ".join(" ".join(c) for c in self.calls)
         self.assertIn("DELETE FROM SlideshowAsset", joined)
+        # Photo, video, and both poster thumbnails are all swept (only one exists).
         self.assertIn("image-ic-x.jpg", joined)
+        self.assertIn("video-ic-x.mp4", joined)
+        self.assertIn("video-small-thumbnail-ic-x.jpg", joined)
+        self.assertIn("video-full-thumbnail-ic-x.jpg", joined)
+
+    def test_push_video_and_poster_naming(self):
+        vpath = self.frame.push_video("/tmp/a.mp4", "ic-x")
+        ppath = self.frame.push_poster("/tmp/a.jpg", "ic-x")
+        pushes = " ".join(" ".join(str(a) for a in c) for c in self.calls if c and c[0] == "push")
+        self.assertIn("video-ic-x.mp4", pushes)
+        self.assertIn("video-small-thumbnail-ic-x.jpg", pushes)
+        self.assertIn("video-full-thumbnail-ic-x.jpg", pushes)   # both posters written
+        self.assertTrue(vpath.endswith("video-ic-x.mp4"))
+        self.assertTrue(ppath.endswith("video-small-thumbnail-ic-x.jpg"))
+
+    def test_insert_video_sets_type_and_thumbnail(self):
+        self.frame.insert_asset("ic-x", "/p/video-ic-x.mp4", 720, 1280,
+                                asset_type="video",
+                                small_thumbnail="/p/video-small-thumbnail-ic-x.jpg")
+        sql = " ".join(self.calls[-1])
+        self.assertIn("'video'", sql)                             # assetType column
+        self.assertIn("video-small-thumbnail-ic-x.jpg", sql)     # smallThumbnail column
+        self.assertIn("1280", sql)                               # height
+        self.assertIn("720", sql)                                # width
+
+    def test_insert_photo_defaults_unchanged(self):
+        self.frame.insert_asset("ic-x", "/p/image-ic-x.jpg", 100, 200)
+        sql = " ".join(self.calls[-1])
+        self.assertIn("'photo'", sql)                            # default assetType
+        # smallThumbnail stays empty for photos: ...,'photo','',0,...
+        self.assertIn("'photo','',", sql)
 
     def test_refresh_restarts_slideshow(self):
         self.frame.refresh_app()
@@ -137,8 +233,8 @@ class TestSyncRefresh(unittest.TestCase):
     """The slideshow only reloads on restart, so a cycle that changes the photo
     set must kick the app -- and a no-op cycle must not (keep the screen steady)."""
 
-    def _run(self, album_photos, have_ids):
-        calls = {"refresh": 0, "added": [], "removed": []}
+    def _run(self, album_assets, have_ids):
+        calls = {"refresh": 0, "added": [], "removed": [], "inserts": []}
 
         class FakeFrame:
             def connect(self):
@@ -150,8 +246,17 @@ class TestSyncRefresh(unittest.TestCase):
             def push_photo(self, path, aid):
                 return f"/p/image-{aid}.jpg"
 
-            def insert_asset(self, aid, *a, **k):
+            def push_video(self, path, aid):
+                return f"/p/video-{aid}.mp4"
+
+            def push_poster(self, path, aid):
+                return f"/p/video-small-thumbnail-{aid}.jpg"
+
+            def insert_asset(self, aid, path, w, h, caption="", sender="icloud@local",
+                             asset_type="photo", small_thumbnail=""):
                 calls["added"].append(aid)
+                calls["inserts"].append({"aid": aid, "type": asset_type,
+                                         "thumb": small_thumbnail, "path": path})
 
             def remove_asset(self, aid):
                 calls["removed"].append(aid)
@@ -160,7 +265,7 @@ class TestSyncRefresh(unittest.TestCase):
                 calls["refresh"] += 1
 
         orig = (sync.fetch_album, sync.download, sync.DRY_RUN)
-        sync.fetch_album = lambda url: {"name": "T", "photos": album_photos}
+        sync.fetch_album = lambda url: {"name": "T", "assets": album_assets}
         sync.download = lambda url, path: open(path, "wb").close()
         sync.DRY_RUN = False
         try:
@@ -171,18 +276,40 @@ class TestSyncRefresh(unittest.TestCase):
 
     @staticmethod
     def _photo(guid):
-        return {"guid": guid, "url": f"https://x/{guid}", "width": 1, "height": 1,
-                "caption": "", "filename": f"{guid}.jpg"}
+        return {"guid": guid, "kind": "photo", "url": f"https://x/{guid}", "width": 1,
+                "height": 1, "caption": "", "filename": f"{guid}.jpg", "poster_url": ""}
+
+    @staticmethod
+    def _video(guid, poster=True):
+        return {"guid": guid, "kind": "video", "url": f"https://x/{guid}.mp4",
+                "width": 720, "height": 1280, "caption": "", "filename": f"{guid}.MOV",
+                "poster_url": f"https://x/{guid}-poster.jpg" if poster else ""}
 
     def test_refresh_when_photo_added(self):
         calls = self._run([self._photo("g1")], have_ids=set())
         self.assertEqual(calls["added"], ["ic-g1"])
+        self.assertEqual(calls["inserts"][0]["type"], "photo")
         self.assertEqual(calls["refresh"], 1)
 
     def test_no_refresh_when_unchanged(self):
         calls = self._run([self._photo("g1")], have_ids={sync._aid("g1")})
         self.assertEqual(calls["added"], [])
         self.assertEqual(calls["refresh"], 0)
+
+    def test_video_added_with_poster(self):
+        calls = self._run([self._video("v1")], have_ids=set())
+        self.assertEqual(calls["added"], ["ic-v1"])
+        ins = calls["inserts"][0]
+        self.assertEqual(ins["type"], "video")
+        self.assertEqual(ins["path"], "/p/video-ic-v1.mp4")
+        self.assertEqual(ins["thumb"], "/p/video-small-thumbnail-ic-v1.jpg")
+        self.assertEqual(calls["refresh"], 1)
+
+    def test_video_added_without_poster(self):
+        calls = self._run([self._video("v1", poster=False)], have_ids=set())
+        ins = calls["inserts"][0]
+        self.assertEqual(ins["type"], "video")
+        self.assertEqual(ins["thumb"], "")          # no poster pushed, smallThumbnail stays empty
 
 
 class TestStatusHealth(unittest.TestCase):

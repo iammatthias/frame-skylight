@@ -51,25 +51,47 @@ class Frame:
         ids = {x.strip() for x in out.splitlines() if x.strip()}
         return {i for i in ids if i.startswith(prefix)} if prefix else ids
 
-    def push_photo(self, local_path, asset_id):
-        remote = f"{PICDIR}/image-{asset_id}.jpg"
+    def _push(self, local_path, remote_name):
+        """adb push a local file into the frame's pictures dir, fix perms, and
+        return the path the slideshow app reads it from."""
+        remote = f"{PICDIR}/{remote_name}"
         self._adb("push", local_path, remote)
         self.shell(f"chmod 644 '{remote}'; chown media_rw:media_rw '{remote}'")
-        return f"{PATHPREFIX}/image-{asset_id}.jpg"
+        return f"{PATHPREFIX}/{remote_name}"
 
-    def insert_asset(self, asset_id, path, width, height, caption="", sender="icloud@local"):
+    def push_photo(self, local_path, asset_id):
+        return self._push(local_path, f"image-{asset_id}.jpg")
+
+    def push_video(self, local_path, asset_id):
+        return self._push(local_path, f"video-{asset_id}.mp4")
+
+    def push_poster(self, local_path, asset_id):
+        """A video slide shows its still from a sibling thumbnail JPEG, not the
+        video itself. The app names that file video-{small,full}-thumbnail-<id>;
+        write both, and return the small one's app path for the smallThumbnail
+        column (the poster the slideshow loads via Glide while the clip buffers)."""
+        small = self._push(local_path, f"video-small-thumbnail-{asset_id}.jpg")
+        self._push(local_path, f"video-full-thumbnail-{asset_id}.jpg")
+        return small
+
+    def insert_asset(self, asset_id, path, width, height, caption="", sender="icloud@local",
+                     asset_type="photo", small_thumbnail=""):
         now = int(time.time() * 1000)
         q = ("INSERT OR REPLACE INTO SlideshowAsset "
              "(serverAssetId,syncToken,caption,url,senderAddress,createdAt,isLiked,"
              "hasBeenSeen,pathToAsset,updatedAt,assetType,smallThumbnail,rotation,"
              "markedForDeletion,imageFileHeight,imageFileWidth,timesFailedToDownload) "
              f"VALUES ('{_esc(asset_id)}',0,'{_esc(caption)}','','{_esc(sender)}',{now},0,1,"
-             f"'{_esc(path)}',{now},'photo','',0,0,{int(height)},{int(width)},0)")
+             f"'{_esc(path)}',{now},'{_esc(asset_type)}','{_esc(small_thumbnail)}',0,0,"
+             f"{int(height)},{int(width)},0)")
         self.sql(q)
 
     def remove_asset(self, asset_id):
         self.sql(f"DELETE FROM SlideshowAsset WHERE serverAssetId='{_esc(asset_id)}'")
-        self.shell(f"rm -f '{PICDIR}/image-{asset_id}.jpg'")
+        names = (f"image-{asset_id}.jpg", f"video-{asset_id}.mp4",
+                 f"video-small-thumbnail-{asset_id}.jpg",
+                 f"video-full-thumbnail-{asset_id}.jpg")
+        self.shell("rm -f " + " ".join(f"'{PICDIR}/{n}'" for n in names))
 
     def refresh_app(self, pkg="com.skylight"):
         """Make the slideshow reload its playlist from the DB.

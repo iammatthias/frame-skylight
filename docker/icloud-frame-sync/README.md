@@ -2,8 +2,9 @@
 
 Drive a (rooted) Skylight Frame from a **public iCloud Shared Album**. A small
 container polls the album and reconciles it into the frame's local slideshow DB
-over network-ADB. Add a photo on your iPhone → it appears on the frame. No
-Skylight cloud, no subscription.
+over network-ADB. Add a photo or video on your iPhone → it appears on the frame.
+No Skylight cloud, no subscription — **including video**, which the Skylight app
+paywalls but the on-device slideshow renderer plays for free.
 
 ```
  iCloud Shared Album  --CloudKit Web Services-->  [ container ]  --adb tcpip-->  Skylight Frame
@@ -16,16 +17,21 @@ over the LAN. Stdlib Python + the `adb` client — no other dependencies.
 ## What it does
 - `icloud_album.py` — resolves the album via **CloudKit Web Services**
   (`ckdatabasews`: `resolve` → `records/query CPLAssetAndMasterByAddedDate` →
-  `resOriginalRes` download URLs). Works with the public
-  `photos.icloud.com/shared/album/<token>` link directly, and pages through the
-  whole album.
-- `frame.py` — `adb push` the JPG + `INSERT` a `SlideshowAsset` row (`pathToAsset`
+  download URLs). Works with the public `photos.icloud.com/shared/album/<token>`
+  link directly, and pages through the whole album. Photos use the original;
+  **videos use Apple's H.264 mp4 derivative** (`resVidMedRes` ~720p, else
+  `resVidSmallRes`) plus a JPEG poster (`resJPEGMedRes`) — never the huge HEVC
+  original the frame can't hardware-decode.
+- `frame.py` — `adb push` the file + `INSERT` a `SlideshowAsset` row (`pathToAsset`
   → the local file), with connect retries for flaky network-ADB. Asset id =
   `ic-<sanitized photoGuid>`; idempotent, and only its own `ic-` rows are touched.
-  Restarts the slideshow app after a changed cycle so new photos actually appear.
-- `sync.py` — every `POLL_INTERVAL`s: add new album photos, remove deleted ones.
-  Self-healing (a re-appearing/removed row is reconciled next cycle), graceful on
-  `SIGTERM`, and serves a `/status` endpoint.
+  Photos push as `image-<id>.jpg`; **videos push as `video-<id>.mp4` with
+  `assetType='video'` and a poster `video-{small,full}-thumbnail-<id>.jpg`** so the
+  slide shows a still. Restarts the slideshow app after a changed cycle so new
+  items actually appear.
+- `sync.py` — every `POLL_INTERVAL`s: add new album photos/videos, remove deleted
+  ones. Self-healing (a re-appearing/removed row is reconciled next cycle),
+  graceful on `SIGTERM`, and serves a `/status` endpoint.
 - `status.py` — in-process HTTP `/status` (JSON; 200 healthy / 503 not), which the
   container HEALTHCHECK and any LAN/tailnet probe read.
 
@@ -61,8 +67,9 @@ binds straight onto the host (no published ports).
 
 ## Tests
 Offline unit tests (no network, no adb) cover album-link parsing, full-album
-pagination, CloudKit record → photo mapping, frame SQL escaping + id
-sanitization, the slideshow-refresh trigger, and the status health state machine:
+pagination, CloudKit record → photo/video mapping (derivative + poster
+selection), frame SQL escaping + id sanitization, video file/thumbnail naming,
+the slideshow-refresh trigger, and the status health state machine:
 ```bash
 python3 -m unittest tests
 ```
@@ -79,6 +86,12 @@ python3 icloud_album.py '…/shared/album/<token>'
 - The frame renders the slideshow **locally** with the Skylight cloud blocked
   (photos live on the frame's `/data`), so it works offline.
 - The slideshow app reads its playlist once at startup, so the sync restarts
-  `com.skylight` after any cycle that added or removed photos.
+  `com.skylight` after any cycle that added or removed items.
 - HEIC: if the album serves HEIC originals (`resOriginalRes`), Android 7 may not
   render them — add JPEGs or extend the fetcher to pick a JPEG derivative.
+- **Video**: Apple serves an H.264 mp4 derivative that the frame's Rockchip chip
+  hardware-decodes; the renderer plays any `assetType='video'` row (no Skylight
+  subscription). The slide's still comes from the iCloud poster, written as
+  `video-small-thumbnail-<id>.jpg` and pointed at by the row's `smallThumbnail`
+  column — without it the app's Glide loader has nothing to show. Audio is muted
+  by the app on the slideshow. The HEVC original is never downloaded.

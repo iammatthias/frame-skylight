@@ -12,7 +12,7 @@ Everything below is persistent on the frame itself; the sync service
 | ADB | network: `adb connect 192.168.1.50:5555` → root shell (no `adb root` needed) |
 | Slideshow app | `com.skylight` |
 | Photo DB | `/data/data/com.skylight/databases/skylight_v2.db` → table `SlideshowAsset` |
-| Photo files | `/data/media/0/Android/data/com.skylight/files/pictures/image-<id>.jpg` |
+| Media files | `…/com.skylight/files/pictures/` — photos `image-<id>.jpg`; videos `video-<id>.mp4` + poster `video-{small,full}-thumbnail-<id>.jpg` |
 | Our injected ids | `ic-<sanitized CloudKit photoGuid>` — only these are ever touched |
 | Album | public iCloud Shared Album — link set via `ALBUM_URL` in `.env` |
 
@@ -47,6 +47,13 @@ Everything below is persistent on the frame itself; the sync service
   away; keep it blocked. The sync loop also re-adds them next poll (self-healing).
 - **HEIC** — shared albums may serve JPEG or HEIC originals. Android 7 may not
   render HEIC; add JPEGs, or extend the fetcher to pick a JPEG derivative.
+- **Video** — the sync pushes Apple's H.264 mp4 derivative (the Rockchip chip
+  hardware-decodes it; the HEVC original is never used) and inserts an
+  `assetType='video'` row. The slide's still is the iCloud poster written as
+  `video-small-thumbnail-<id>.jpg` and referenced by the row's `smallThumbnail`
+  column. Skylight paywalls video in the app, but the local renderer plays it.
+  ExoPlayer logs a harmless "Format exceeds selected codec's capabilities" warning
+  (Rockchip under-reports OMX caps) and decodes 720p fine anyway.
 
 ## Reverting the frame mods (if ever undoing this)
 Remount `/system` rw, then remove: the CA (`da4eea83.0`), the `/system/etc/hosts`

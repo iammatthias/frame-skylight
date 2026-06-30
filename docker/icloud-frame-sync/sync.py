@@ -55,36 +55,63 @@ def download(url, path):
             f.write(chunk)
 
 
+def _download_tmp(url, suffix):
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False).name
+    download(url, tmp)
+    return tmp
+
+
+def _add_asset(frame, aid, p):
+    """Fetch one album asset onto the frame and insert its slideshow row. Photos
+    push a single JPEG; videos push the H.264 mp4 plus a poster JPEG (the still
+    the frame shows while the clip buffers). Temp files are always cleaned up."""
+    tmps = []
+    try:
+        if p["kind"] == "video":
+            path = frame.push_video(_keep(tmps, _download_tmp(p["url"], ".mp4")), aid)
+            thumb = ""
+            if p.get("poster_url"):
+                thumb = frame.push_poster(_keep(tmps, _download_tmp(p["poster_url"], ".jpg")), aid)
+            frame.insert_asset(aid, path, p["width"], p["height"], p["caption"],
+                               asset_type="video", small_thumbnail=thumb)
+        else:
+            path = frame.push_photo(_keep(tmps, _download_tmp(p["url"], ".jpg")), aid)
+            frame.insert_asset(aid, path, p["width"], p["height"], p["caption"])
+    finally:
+        for t in tmps:
+            try:
+                os.unlink(t)
+            except OSError:
+                pass
+
+
+def _keep(bucket, path):
+    bucket.append(path)
+    return path
+
+
 def sync_once(frame, state):
     frame.connect()
     state.update(frame_reachable=True)
     album = fetch_album(ALBUM)
-    want = {_aid(p["guid"]): p for p in album["photos"] if p["url"]}
+    want = {_aid(p["guid"]): p for p in album["assets"] if p["url"]}
     have = frame.asset_ids(prefix=ID_PREFIX)
-    state.update(album=album["name"], album_count=len(album["photos"]))
+    state.update(album=album["name"], album_count=len(album["assets"]))
     added = removed = 0
 
     for aid, p in want.items():
         if aid in have:
             continue
         if DRY_RUN:
-            log(f"would add {aid}  {p['width']}x{p['height']}  {p['filename']}")
+            log(f"would add [{p['kind']}] {aid}  {p['width']}x{p['height']}  {p['filename']}")
             added += 1
             continue
-        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False).name
         try:
-            download(p["url"], tmp)
-            path = frame.push_photo(tmp, aid)
-            frame.insert_asset(aid, path, p["width"], p["height"], p["caption"])
+            _add_asset(frame, aid, p)
             added += 1
-            log(f"+ {aid}  {p['width']}x{p['height']}  {p['filename']}")
+            log(f"+ [{p['kind']}] {aid}  {p['width']}x{p['height']}  {p['filename']}")
         except Exception as e:
             log(f"! failed {aid}: {e}")
-        finally:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
 
     for aid in have - set(want):
         if DRY_RUN:
@@ -109,7 +136,7 @@ def sync_once(frame, state):
     state.update(frame_ic_count=total_ic, last_added=added, last_removed=removed,
                  last_error=None)
     state.mark_synced()
-    log(f"sync done: album={len(album['photos'])} added={added} removed={removed} "
+    log(f"sync done: album={len(album['assets'])} added={added} removed={removed} "
         f"ic_total={total_ic}{' (dry-run)' if DRY_RUN else ''}")
 
 

@@ -1,17 +1,18 @@
 # frame-skylight
 
 Drive a rooted **Skylight Frame** from a **public iCloud Shared Album** — no
-Skylight cloud, no subscription, no trackers. Add a photo on your iPhone and it
-shows up on the frame within a poll interval.
+Skylight cloud, no subscription, no trackers. Add a photo **or video** on your
+iPhone and it shows up on the frame within a poll interval (video is paywalled in
+the Skylight app, but the on-device renderer plays it for free).
 
 ```
  iCloud Shared Album  --CloudKit Web Services-->  [ icloud-frame-sync ]  --adb tcpip-->  Skylight Frame
- (you add photos)                                 (Docker host)                          (com.skylight slideshow)
+ (you add photos/videos)                          (Docker host)                          (com.skylight slideshow)
 ```
 
-A small container polls the album and reconciles photos into the frame's local
-slideshow DB over network-ADB. It runs as its own standalone Docker project on
-any host that can reach the frame across the LAN.
+A small container polls the album and reconciles photos and videos into the
+frame's local slideshow DB over network-ADB. It runs as its own standalone Docker
+project on any host that can reach the frame across the LAN.
 
 ## Repo layout
 - **`docker/icloud-frame-sync/`** — the service: the sync daemon, Dockerfile,
@@ -27,8 +28,8 @@ cp .env.example .env           # set ALBUM_URL (+ FRAME_HOST for your frame)
 docker compose up -d --build
 curl -s localhost:8780/status  # JSON health snapshot
 ```
-Add/remove photos by editing the iCloud album — the frame reflects it within
-`POLL_INTERVAL`. Full config, ops, and tests are in the service README.
+Add/remove photos and videos by editing the iCloud album — the frame reflects it
+within `POLL_INTERVAL`. Full config, ops, and tests are in the service README.
 
 ## Status
 The frame is reconciled to the album; health is at `http://<host>:8780/status`.
