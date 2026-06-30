@@ -6,7 +6,7 @@ our own ic- rows are touched — any cloud/Skylight photos are left alone.
 
 Config (env):
   ALBUM_URL       public iCloud Shared Album link (required)
-  FRAME_HOST      frame network-adb endpoint, ip:port (default 192.168.50.72:5555)
+  FRAME_HOST      frame network-adb endpoint, ip:port (default 192.168.1.50:5555)
   POLL_INTERVAL   reconcile period in seconds; <= 0 runs one cycle and exits
   DRY_RUN         "1" to log the plan without pushing/inserting/removing anything
   STATUS_ADDR     status HTTP bind address (default 0.0.0.0)
@@ -28,7 +28,7 @@ from frame import Frame
 from status import State, serve
 
 ALBUM = os.environ.get("ALBUM_URL", "")
-FRAME_HOST = os.environ.get("FRAME_HOST", "192.168.50.72:5555")
+FRAME_HOST = os.environ.get("FRAME_HOST", "192.168.1.50:5555")
 INTERVAL = int(os.environ.get("POLL_INTERVAL", "300"))
 DRY_RUN = os.environ.get("DRY_RUN", "") in ("1", "true", "yes")
 STATUS_ADDR = os.environ.get("STATUS_ADDR", "0.0.0.0")

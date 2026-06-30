@@ -1,6 +1,6 @@
 """Tiny stdlib HTTP status surface for the sync daemon.
 
-The sync is a background loop with no web UI, but a beelink service should still
+The sync is a background loop with no web UI, but a deployed service should still
 expose its health. `State` holds a snapshot of the last cycle; `serve` runs a
 threaded HTTP server that answers:
 

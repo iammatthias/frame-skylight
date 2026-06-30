@@ -19,7 +19,7 @@ def _esc(s):
 
 class Frame:
     def __init__(self, host):
-        self.host = host                       # e.g. "192.168.50.72:5555"
+        self.host = host                       # e.g. "192.168.1.50:5555"
 
     def _adb(self, *args):
         return subprocess.run(["adb", "-s", self.host, *args],

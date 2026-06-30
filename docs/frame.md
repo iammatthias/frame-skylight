@@ -7,18 +7,16 @@ Everything below is persistent on the frame itself; the sync service
 ## Facts
 | thing | value |
 |-------|-------|
-| Frame IP | `192.168.50.72:5555` — **set a DHCP reservation** (it has drifted) |
+| Frame IP | set via `FRAME_HOST` (e.g. `192.168.1.50:5555`) — **set a DHCP reservation** |
 | Frame model / OS | D106 (Skylight Frame) · Android 7.1.2 · Rockchip RK3126C · userdebug |
-| ADB | network: `adb connect 192.168.50.72:5555` → root shell (no `adb root` needed) |
+| ADB | network: `adb connect 192.168.1.50:5555` → root shell (no `adb root` needed) |
 | Slideshow app | `com.skylight` |
 | Photo DB | `/data/data/com.skylight/databases/skylight_v2.db` → table `SlideshowAsset` |
 | Photo files | `/data/media/0/Android/data/com.skylight/files/pictures/image-<id>.jpg` |
 | Our injected ids | `ic-<sanitized CloudKit photoGuid>` — only these are ever touched |
-| Album | public iCloud Shared Album "Skylight Frame" (link is in the Beelink `.env`) |
+| Album | public iCloud Shared Album — link set via `ALBUM_URL` in `.env` |
 
-> The frame's MAC for the DHCP reservation: confirm it from the router. (An earlier
-> note listed `e8:9c:25:87:27:c0`, which looks like the gateway; `.72` resolved to
-> `9c:b8:b4:a8:a3:2c` in testing.)
+> For the DHCP reservation, get the frame's MAC from your router's client list.
 
 ## Persistent mods already applied to the frame (one-time)
 - **Rooted ADB** — userdebug build, shell is uid 0.
@@ -36,9 +34,8 @@ Everything below is persistent on the frame itself; the sync service
   didn't hold. Recover once over USB: `adb tcpip 5555` (build.prop should prevent
   recurrence).
 - **`device offline`** — usually two ADB masters fighting for the frame. Only one
-  syncer should run (the Beelink). If it persists, reboot the frame's ADB / power-
-  cycle it.
-- **Frame IP changed** — update `FRAME_HOST` in the Beelink `.env` and
+  syncer should run. If it persists, reboot the frame's ADB / power-cycle it.
+- **Frame IP changed** — update `FRAME_HOST` in `.env` and
   `docker compose up -d`. Fix permanently with a DHCP reservation.
 - **Slideshow shows a setup/error screen** (not photos) — the cloud block is too
   aggressive for this app build. Remount rw and drop the `app.ourskylight.com`
@@ -48,8 +45,8 @@ Everything below is persistent on the frame itself; the sync service
   ```
 - **Photos vanish** — only if the cloud becomes reachable and reconciles them
   away; keep it blocked. The sync loop also re-adds them next poll (self-healing).
-- **HEIC** — the album currently serves JPEG originals. Android 7 may not render
-  HEIC; add JPEGs, or extend the fetcher to pick a JPEG derivative.
+- **HEIC** — shared albums may serve JPEG or HEIC originals. Android 7 may not
+  render HEIC; add JPEGs, or extend the fetcher to pick a JPEG derivative.
 
 ## Reverting the frame mods (if ever undoing this)
 Remount `/system` rw, then remove: the CA (`da4eea83.0`), the `/system/etc/hosts`
