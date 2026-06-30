@@ -1,0 +1,26 @@
+# Cap container log growth — json-file defaults to unbounded. Mirrors the
+# beelink /srv/stack convention.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  skylight-icloud-sync:
+    build: .
+    image: skylight-icloud-sync
+    container_name: skylight-icloud-sync
+    logging: *default-logging
+    # Host networking so adb reaches the frame on the LAN (frame:5555) and the
+    # status endpoint binds straight onto the host (no published ports with host
+    # net). Reachable at http://<beelink>:${STATUS_PORT}/status on the LAN/tailnet.
+    network_mode: host
+    environment:
+      ALBUM_URL: "${ALBUM_URL}"                    # public Shared Album link
+      FRAME_HOST: "${FRAME_HOST:-192.168.50.72:5555}"
+      POLL_INTERVAL: "${POLL_INTERVAL:-300}"
+      DRY_RUN: "${DRY_RUN:-}"                       # "1" to plan without writing
+      STATUS_ADDR: "${STATUS_ADDR:-0.0.0.0}"
+      STATUS_PORT: "${STATUS_PORT:-8780}"
+    restart: unless-stopped

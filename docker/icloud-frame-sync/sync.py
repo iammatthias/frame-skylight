@@ -1,0 +1,139 @@
+"""Reconcile a public iCloud Shared Album into the Skylight frame, on a loop.
+
+Adds photos new in the album, removes ones deleted from it. Idempotent: each
+frame asset id is "ic-<sanitized photoGuid>", so re-runs never duplicate and only
+our own ic- rows are touched — any cloud/Skylight photos are left alone.
+
+Config (env):
+  ALBUM_URL       public iCloud Shared Album link (required)
+  FRAME_HOST      frame network-adb endpoint, ip:port (default 192.168.50.72:5555)
+  POLL_INTERVAL   reconcile period in seconds; <= 0 runs one cycle and exits
+  DRY_RUN         "1" to log the plan without pushing/inserting/removing anything
+  STATUS_ADDR     status HTTP bind address (default 0.0.0.0)
+  STATUS_PORT     status HTTP port (default 8780); GET /status
+
+Health/observability live at http://STATUS_ADDR:STATUS_PORT/status.
+"""
+import os
+import re
+import signal
+import sys
+import tempfile
+import threading
+import urllib.request
+from datetime import datetime, timezone
+
+from icloud_album import fetch_album
+from frame import Frame
+from status import State, serve
+
+ALBUM = os.environ.get("ALBUM_URL", "")
+FRAME_HOST = os.environ.get("FRAME_HOST", "192.168.50.72:5555")
+INTERVAL = int(os.environ.get("POLL_INTERVAL", "300"))
+DRY_RUN = os.environ.get("DRY_RUN", "") in ("1", "true", "yes")
+STATUS_ADDR = os.environ.get("STATUS_ADDR", "0.0.0.0")
+STATUS_PORT = int(os.environ.get("STATUS_PORT", "8780"))
+ID_PREFIX = "ic-"
+
+_stop = threading.Event()
+
+
+def log(*a):
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(ts, *a, flush=True)
+
+
+def _aid(guid):
+    # Filesystem- and shell-safe, stable id. GUIDs can contain / + : etc.
+    return ID_PREFIX + re.sub(r"[^A-Za-z0-9]", "_", guid)
+
+
+def download(url, path):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=90) as r, open(path, "wb") as f:
+        while chunk := r.read(1 << 16):
+            f.write(chunk)
+
+
+def sync_once(frame, state):
+    frame.connect()
+    state.update(frame_reachable=True)
+    album = fetch_album(ALBUM)
+    want = {_aid(p["guid"]): p for p in album["photos"] if p["url"]}
+    have = frame.asset_ids(prefix=ID_PREFIX)
+    state.update(album=album["name"], album_count=len(album["photos"]))
+    added = removed = 0
+
+    for aid, p in want.items():
+        if aid in have:
+            continue
+        if DRY_RUN:
+            log(f"would add {aid}  {p['width']}x{p['height']}  {p['filename']}")
+            added += 1
+            continue
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False).name
+        try:
+            download(p["url"], tmp)
+            path = frame.push_photo(tmp, aid)
+            frame.insert_asset(aid, path, p["width"], p["height"], p["caption"])
+            added += 1
+            log(f"+ {aid}  {p['width']}x{p['height']}  {p['filename']}")
+        except Exception as e:
+            log(f"! failed {aid}: {e}")
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    for aid in have - set(want):
+        if DRY_RUN:
+            log(f"would remove {aid}")
+            removed += 1
+            continue
+        frame.remove_asset(aid)
+        removed += 1
+        log(f"- {aid}")
+
+    # Real current count: re-query after a live cycle; in dry-run nothing
+    # changed, so report what the frame holds now (len(have)), not the plan.
+    total_ic = len(have) if DRY_RUN else len(frame.asset_ids(prefix=ID_PREFIX))
+    state.update(frame_ic_count=total_ic, last_added=added, last_removed=removed,
+                 last_error=None)
+    state.mark_synced()
+    log(f"sync done: album={len(album['photos'])} added={added} removed={removed} "
+        f"ic_total={total_ic}{' (dry-run)' if DRY_RUN else ''}")
+
+
+def _handle_signal(signum, _frame):
+    log(f"received signal {signum}, shutting down")
+    _stop.set()
+
+
+def main():
+    if not ALBUM:
+        sys.exit("ALBUM_URL is required (the public iCloud Shared Album link)")
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _handle_signal)
+
+    state = State(INTERVAL)
+    state.update(frame_host=FRAME_HOST)
+    serve(state, STATUS_ADDR, STATUS_PORT)
+    log(f"skylight-icloud-sync: album -> {FRAME_HOST} every {INTERVAL}s; "
+        f"status on :{STATUS_PORT}/status{'; DRY_RUN' if DRY_RUN else ''}")
+
+    frame = Frame(FRAME_HOST)
+    while not _stop.is_set():
+        try:
+            sync_once(frame, state)
+        except Exception as e:
+            state.update(frame_reachable=False, last_error=str(e))
+            log("sync error:", e)
+        if INTERVAL <= 0:
+            break
+        _stop.wait(INTERVAL)  # wakes immediately on a shutdown signal
+    log("stopped")
+
+
+if __name__ == "__main__":
+    main()

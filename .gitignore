@@ -1,0 +1,11 @@
+# Secrets — env files carry the album token.
+.env
+docker/**/.env
+
+# Python
+__pycache__/
+*.pyc
+
+# OS / editor noise
+.DS_Store
+*.log
