@@ -52,6 +52,43 @@ class TestAlbumParsing(unittest.TestCase):
             {"recordType": "CPLMaster", "recordName": "x", "fields": {}}))
 
 
+class TestAlbumPagination(unittest.TestCase):
+    def test_fetches_every_page(self):
+        # An album of 130 photos. CloudKit returns each photo as a CPLMaster +
+        # CPLAsset pair (so a 100-record page = 50 photos), added-date ASCENDING,
+        # paged by startRank. The old loop stopped after page 1 and returned only
+        # the oldest 50 -- dropping the newest 80, which is the live symptom.
+        PAGE, TOTAL = icloud_album.PAGE, 130
+
+        def master(i):
+            return {
+                "recordType": "CPLMaster", "recordName": f"guid-{i:04d}",
+                "fields": {
+                    "resOriginalRes": {"value": {"downloadURL": f"https://x/{i}/${{f}}"}},
+                    "resOriginalWidth": {"value": 100}, "resOriginalHeight": {"value": 100},
+                    "filenameEnc": {"value": base64.b64encode(f"p{i}.jpg".encode()).decode()},
+                },
+            }
+
+        # Full record stream: master+asset per photo, ascending.
+        stream = []
+        for i in range(TOTAL):
+            stream += [master(i), {"recordType": "CPLAsset", "recordName": f"a-{i}", "fields": {}}]
+
+        orig_q, orig_r = icloud_album._query, icloud_album._resolve
+        # startRank is in photo units; two records per photo => slice at start*2.
+        icloud_album._query = lambda ctx, start: {"records": stream[start * 2: start * 2 + PAGE]}
+        icloud_album._resolve = lambda token: {"zoneID": {}, "authToken": "", "host": "", "title": "T"}
+        try:
+            album = icloud_album.fetch_album("0bTOKEN")
+        finally:
+            icloud_album._query, icloud_album._resolve = orig_q, orig_r
+
+        self.assertEqual(len(album["photos"]), TOTAL)            # not 50
+        self.assertEqual(album["photos"][0]["guid"], "guid-0000")
+        self.assertEqual(album["photos"][-1]["guid"], f"guid-{TOTAL - 1:04d}")  # newest present
+
+
 class TestFrameSQL(unittest.TestCase):
     def setUp(self):
         # A Frame that records the adb commands instead of running them.
@@ -88,6 +125,64 @@ class TestFrameSQL(unittest.TestCase):
         joined = " ".join(" ".join(c) for c in self.calls)
         self.assertIn("DELETE FROM SlideshowAsset", joined)
         self.assertIn("image-ic-x.jpg", joined)
+
+    def test_refresh_restarts_slideshow(self):
+        self.frame.refresh_app()
+        joined = " ".join(" ".join(c) for c in self.calls)
+        self.assertIn("force-stop com.skylight", joined)   # reload the playlist
+        self.assertIn("monkey -p com.skylight", joined)    # relaunch into slideshow
+
+
+class TestSyncRefresh(unittest.TestCase):
+    """The slideshow only reloads on restart, so a cycle that changes the photo
+    set must kick the app -- and a no-op cycle must not (keep the screen steady)."""
+
+    def _run(self, album_photos, have_ids):
+        calls = {"refresh": 0, "added": [], "removed": []}
+
+        class FakeFrame:
+            def connect(self):
+                pass
+
+            def asset_ids(self, prefix=None):
+                return set(have_ids)
+
+            def push_photo(self, path, aid):
+                return f"/p/image-{aid}.jpg"
+
+            def insert_asset(self, aid, *a, **k):
+                calls["added"].append(aid)
+
+            def remove_asset(self, aid):
+                calls["removed"].append(aid)
+
+            def refresh_app(self):
+                calls["refresh"] += 1
+
+        orig = (sync.fetch_album, sync.download, sync.DRY_RUN)
+        sync.fetch_album = lambda url: {"name": "T", "photos": album_photos}
+        sync.download = lambda url, path: open(path, "wb").close()
+        sync.DRY_RUN = False
+        try:
+            sync.sync_once(FakeFrame(), status.State(300))
+        finally:
+            sync.fetch_album, sync.download, sync.DRY_RUN = orig
+        return calls
+
+    @staticmethod
+    def _photo(guid):
+        return {"guid": guid, "url": f"https://x/{guid}", "width": 1, "height": 1,
+                "caption": "", "filename": f"{guid}.jpg"}
+
+    def test_refresh_when_photo_added(self):
+        calls = self._run([self._photo("g1")], have_ids=set())
+        self.assertEqual(calls["added"], ["ic-g1"])
+        self.assertEqual(calls["refresh"], 1)
+
+    def test_no_refresh_when_unchanged(self):
+        calls = self._run([self._photo("g1")], have_ids={sync._aid("g1")})
+        self.assertEqual(calls["added"], [])
+        self.assertEqual(calls["refresh"], 0)
 
 
 class TestStatusHealth(unittest.TestCase):

@@ -95,6 +95,14 @@ def sync_once(frame, state):
         removed += 1
         log(f"- {aid}")
 
+    # The slideshow app caches its playlist at process start and ignores our
+    # external DB writes, so new/removed photos only show after a restart. Kick
+    # it once per cycle that actually changed something (keeps the screen steady
+    # on the common no-op cycle).
+    if not DRY_RUN and (added or removed):
+        frame.refresh_app()
+        log("refreshed slideshow app to load DB changes")
+
     # Real current count: re-query after a live cycle; in dry-run nothing
     # changed, so report what the frame holds now (len(have)), not the plan.
     total_ic = len(have) if DRY_RUN else len(frame.asset_ids(prefix=ID_PREFIX))

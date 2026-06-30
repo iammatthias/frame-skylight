@@ -70,3 +70,14 @@ class Frame:
     def remove_asset(self, asset_id):
         self.sql(f"DELETE FROM SlideshowAsset WHERE serverAssetId='{_esc(asset_id)}'")
         self.shell(f"rm -f '{PICDIR}/image-{asset_id}.jpg'")
+
+    def refresh_app(self, pkg="com.skylight"):
+        """Make the slideshow reload its playlist from the DB.
+
+        The app reads SlideshowAsset once at process start and ignores external
+        INSERT/DELETEs, so freshly synced photos don't appear until it restarts.
+        force-stop + relaunch the launcher activity; the frame keeps the app as
+        its foreground/home, so it comes straight back into the slideshow with
+        the current DB contents."""
+        self.shell(f"am force-stop {pkg}")
+        self.shell(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1")

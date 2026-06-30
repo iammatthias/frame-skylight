@@ -89,21 +89,37 @@ def photo_from_master(m):
 
 
 def fetch_album(url_or_token):
-    """Return {'name': str, 'photos': [{guid, filename, caption, width, height, url}]}."""
+    """Return {'name': str, 'photos': [{guid, filename, caption, width, height, url}]}.
+
+    Pages through the WHOLE album. Each asset comes back as two records (a
+    CPLMaster + a CPLAsset), so a full PAGE-record response carries only ~PAGE/2
+    photos. The page boundary is therefore a short *record* page, never a short
+    *master* page -- the latter was the old bug: ~50 masters per 100-record page
+    is always < PAGE, so the loop stopped after page 1 and dropped everything
+    past the first ~50 photos. Since the query is added-date ASCENDING, those
+    dropped photos are exactly the newest ones, so freshly added album photos
+    never reached the frame. startRank advances by the photos seen on each page;
+    guids dedupe any page overlap and signal the end.
+    """
     ctx = _resolve(token_from_url(url_or_token))
     ctx["token"] = token_from_url(url_or_token)
-    photos, start = [], 0
+    photos, seen, start = [], set(), 0
     while start < 100000:                       # safety cap
         records = _query(ctx, start).get("records", [])
-        masters = [r for r in records if r.get("recordType") == "CPLMaster"]
-        if not masters:
+        if not records:
             break
-        for m in masters:
+        fresh = 0
+        masters = 0
+        for m in records:
+            if m.get("recordType") == "CPLMaster":
+                masters += 1
             p = photo_from_master(m)
-            if p:
+            if p and p["guid"] not in seen:
+                seen.add(p["guid"])
                 photos.append(p)
-        start += len(masters)
-        if len(masters) < PAGE:
+                fresh += 1
+        start += masters or len(records)        # advance by photos on this page
+        if len(records) < PAGE or fresh == 0:   # short page, or nothing new => done
             break
     return {"name": ctx["title"], "photos": photos}
 
