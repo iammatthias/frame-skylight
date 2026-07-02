@@ -12,6 +12,17 @@ DB = "/data/data/com.skylight/databases/skylight_v2.db"
 PICDIR = "/data/media/0/Android/data/com.skylight/files/pictures"          # writable path
 PATHPREFIX = "/storage/emulated/0/Android/data/com.skylight/files/pictures"  # path the app reads
 
+# Every file name an asset id can map to. Only one kind exists per row (photo or
+# video + posters), but a remove/reset must sweep them all -- the single source
+# of truth so cleanup never drifts from what push_* writes ({id} is the asset id,
+# or an "ic-*" glob for a bulk reset).
+MEDIA_NAMES = {
+    "photo": "image-{id}.jpg",
+    "video": "video-{id}.mp4",
+    "poster_small": "video-small-thumbnail-{id}.jpg",
+    "poster_full": "video-full-thumbnail-{id}.jpg",
+}
+
 
 def _esc(s):
     return s.replace("'", "''")
@@ -21,9 +32,9 @@ class Frame:
     def __init__(self, host):
         self.host = host                       # e.g. "192.168.1.50:5555"
 
-    def _adb(self, *args):
+    def _adb(self, *args, text_input=None):
         return subprocess.run(["adb", "-s", self.host, *args],
-                              capture_output=True, text=True)
+                              input=text_input, capture_output=True, text=True)
 
     def connect(self, attempts=3, backoff=2.0):
         # Network-adb drops are common (frame sleeps, wifi blips). Retry a few
@@ -44,7 +55,12 @@ class Frame:
         return self._adb("shell", cmd).stdout
 
     def sql(self, q):
-        return self.shell(f'sqlite3 {DB} "{q}"').strip()
+        # Pipe the statement to sqlite3 over stdin rather than embedding it in a
+        # shell command line -- no shell quoting, so a value containing " $ ` etc.
+        # can't break out of the command (SQL literals are still escaped by _esc).
+        if not q.rstrip().endswith(";"):
+            q += ";"
+        return self._adb("shell", "sqlite3", DB, text_input=q).stdout.strip()
 
     def asset_ids(self, prefix=None):
         out = self.sql("SELECT serverAssetId FROM SlideshowAsset")
@@ -53,25 +69,29 @@ class Frame:
 
     def _push(self, local_path, remote_name):
         """adb push a local file into the frame's pictures dir, fix perms, and
-        return the path the slideshow app reads it from."""
+        return the path the slideshow app reads it from. Raises on push failure
+        so a missing file never gets a slideshow row (it's retried next cycle)."""
         remote = f"{PICDIR}/{remote_name}"
-        self._adb("push", local_path, remote)
+        r = self._adb("push", local_path, remote)
+        if r.returncode != 0 or "error:" in (r.stderr or "").lower():
+            raise RuntimeError(f"adb push failed for {remote_name}: "
+                               f"{(r.stderr or r.stdout).strip()}")
         self.shell(f"chmod 644 '{remote}'; chown media_rw:media_rw '{remote}'")
         return f"{PATHPREFIX}/{remote_name}"
 
     def push_photo(self, local_path, asset_id):
-        return self._push(local_path, f"image-{asset_id}.jpg")
+        return self._push(local_path, MEDIA_NAMES["photo"].format(id=asset_id))
 
     def push_video(self, local_path, asset_id):
-        return self._push(local_path, f"video-{asset_id}.mp4")
+        return self._push(local_path, MEDIA_NAMES["video"].format(id=asset_id))
 
     def push_poster(self, local_path, asset_id):
         """A video slide shows its still from a sibling thumbnail JPEG, not the
         video itself. The app names that file video-{small,full}-thumbnail-<id>;
         write both, and return the small one's app path for the smallThumbnail
         column (the poster the slideshow loads via Glide while the clip buffers)."""
-        small = self._push(local_path, f"video-small-thumbnail-{asset_id}.jpg")
-        self._push(local_path, f"video-full-thumbnail-{asset_id}.jpg")
+        small = self._push(local_path, MEDIA_NAMES["poster_small"].format(id=asset_id))
+        self._push(local_path, MEDIA_NAMES["poster_full"].format(id=asset_id))
         return small
 
     def insert_asset(self, asset_id, path, width, height, caption="", sender="icloud@local",
@@ -88,10 +108,8 @@ class Frame:
 
     def remove_asset(self, asset_id):
         self.sql(f"DELETE FROM SlideshowAsset WHERE serverAssetId='{_esc(asset_id)}'")
-        names = (f"image-{asset_id}.jpg", f"video-{asset_id}.mp4",
-                 f"video-small-thumbnail-{asset_id}.jpg",
-                 f"video-full-thumbnail-{asset_id}.jpg")
-        self.shell("rm -f " + " ".join(f"'{PICDIR}/{n}'" for n in names))
+        files = " ".join(f"'{PICDIR}/{n.format(id=asset_id)}'" for n in MEDIA_NAMES.values())
+        self.shell("rm -f " + files)
 
     def refresh_app(self, pkg="com.skylight"):
         """Make the slideshow reload its playlist from the DB.

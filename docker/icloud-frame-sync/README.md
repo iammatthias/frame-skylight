@@ -87,6 +87,10 @@ python3 icloud_album.py '…/shared/album/<token>'
   (photos live on the frame's `/data`), so it works offline.
 - The slideshow app reads its playlist once at startup, so the sync restarts
   `com.skylight` after any cycle that added or removed items.
+- **Safety valve**: a cycle whose album fetch returns *zero* assets is treated as
+  an anomaly (token/API hiccup), not a mass delete — removals are skipped so a
+  transient glitch can't wipe the frame. Clear the frame intentionally with
+  `reset.py`.
 - HEIC: if the album serves HEIC originals (`resOriginalRes`), Android 7 may not
   render them — add JPEGs or extend the fetcher to pick a JPEG derivative.
 - **Video**: Apple serves an H.264 mp4 derivative that the frame's Rockchip chip

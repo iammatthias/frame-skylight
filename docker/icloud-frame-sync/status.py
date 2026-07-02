@@ -39,6 +39,8 @@ class State:
             "frame_reachable": False,
             "album": None,
             "album_count": None,
+            "album_photos": None,
+            "album_videos": None,
             "frame_ic_count": None,
             "last_added": 0,
             "last_removed": 0,

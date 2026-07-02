@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
 
 from icloud_album import fetch_album
@@ -96,12 +97,15 @@ def sync_once(frame, state):
     album = fetch_album(ALBUM)
     want = {_aid(p["guid"]): p for p in album["assets"] if p["url"]}
     have = frame.asset_ids(prefix=ID_PREFIX)
-    state.update(album=album["name"], album_count=len(album["assets"]))
+    kinds = Counter(p["kind"] for p in album["assets"])
+    state.update(album=album["name"], album_count=len(album["assets"]),
+                 album_photos=kinds.get("photo", 0), album_videos=kinds.get("video", 0))
     added = removed = 0
 
     for aid, p in want.items():
         if aid in have:
-            continue
+            continue  # already on the frame. NB: in-place album edits (same guid,
+                      # re-cropped) are not re-fetched -- id presence wins here.
         if DRY_RUN:
             log(f"would add [{p['kind']}] {aid}  {p['width']}x{p['height']}  {p['filename']}")
             added += 1
@@ -113,7 +117,16 @@ def sync_once(frame, state):
         except Exception as e:
             log(f"! failed {aid}: {e}")
 
-    for aid in have - set(want):
+    to_remove = have - set(want)
+    # Safety valve: a *successful* fetch returning zero assets is almost always an
+    # API/token hiccup, not "the user emptied the album" -- removing then would
+    # wipe (and re-download) the whole frame. Skip removals in that case; a
+    # genuinely emptied album is cleared intentionally with reset.py.
+    if not want and to_remove:
+        log(f"! album returned 0 assets but frame has {len(to_remove)} ic- items; "
+            f"skipping removals (run reset.py to clear intentionally)")
+        to_remove = set()
+    for aid in to_remove:
         if DRY_RUN:
             log(f"would remove {aid}")
             removed += 1

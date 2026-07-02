@@ -1,5 +1,6 @@
-# amd64 (Beelink) — stdlib Python + adb client only.
-FROM python:3.12-slim
+# amd64 — stdlib Python + adb client only. Pin the Debian release so an apt
+# base bump can't silently change the adb build under us.
+FROM python:3.12-slim-bookworm
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends adb \

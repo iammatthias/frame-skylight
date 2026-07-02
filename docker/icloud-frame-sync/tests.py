@@ -156,20 +156,28 @@ class TestAlbumPagination(unittest.TestCase):
 
 class TestFrameSQL(unittest.TestCase):
     def setUp(self):
-        # A Frame that records the adb commands instead of running them.
+        # A Frame that records adb commands instead of running them. SQL now goes
+        # to sqlite3 over stdin, so it lands in sql_inputs, not the argv calls.
         self.calls = []
+        self.sql_inputs = []
 
         class FakeFrame(frame.Frame):
-            def _adb(inner, *args):
+            def _adb(inner, *args, text_input=None):
                 self.calls.append(args)
+                if text_input is not None:
+                    self.sql_inputs.append(text_input)
 
                 class R:
+                    returncode = 0
                     stdout = ""
                     stderr = ""
 
                 return R()
 
         self.frame = FakeFrame("1.2.3.4:5555")
+
+    def _all_args(self):
+        return " ".join(" ".join(str(a) for a in c) for c in self.calls)
 
     def test_aid_is_shell_and_fs_safe(self):
         aid = sync._aid("Ah7p/x:1+2")
@@ -179,21 +187,28 @@ class TestFrameSQL(unittest.TestCase):
 
     def test_caption_quotes_escaped(self):
         self.frame.insert_asset("ic-x", "/p/img.jpg", 100, 200, caption="O'Brien's trip")
-        sql = " ".join(self.calls[-1])
+        sql = self.sql_inputs[-1]
         self.assertIn("O''Brien''s trip", sql)   # '' = escaped single quote
         self.assertIn("ic-x", sql)
         self.assertIn("200", sql)                 # height
         self.assertIn("100", sql)                 # width
 
+    def test_sql_piped_on_stdin_not_argv(self):
+        # The statement must travel on stdin (shell can't reinterpret it), never
+        # embedded in the adb argv -- that's what defuses the injection.
+        self.frame.sql("SELECT 1")
+        self.assertIn("SELECT 1;", self.sql_inputs[-1])
+        self.assertNotIn("SELECT 1", self._all_args())
+
     def test_remove_deletes_row_and_all_files(self):
         self.frame.remove_asset("ic-x")
-        joined = " ".join(" ".join(c) for c in self.calls)
-        self.assertIn("DELETE FROM SlideshowAsset", joined)
+        self.assertIn("DELETE FROM SlideshowAsset", " ".join(self.sql_inputs))
+        rm = self._all_args()   # the rm runs as a shell command (argv)
         # Photo, video, and both poster thumbnails are all swept (only one exists).
-        self.assertIn("image-ic-x.jpg", joined)
-        self.assertIn("video-ic-x.mp4", joined)
-        self.assertIn("video-small-thumbnail-ic-x.jpg", joined)
-        self.assertIn("video-full-thumbnail-ic-x.jpg", joined)
+        self.assertIn("image-ic-x.jpg", rm)
+        self.assertIn("video-ic-x.mp4", rm)
+        self.assertIn("video-small-thumbnail-ic-x.jpg", rm)
+        self.assertIn("video-full-thumbnail-ic-x.jpg", rm)
 
     def test_push_video_and_poster_naming(self):
         vpath = self.frame.push_video("/tmp/a.mp4", "ic-x")
@@ -205,11 +220,23 @@ class TestFrameSQL(unittest.TestCase):
         self.assertTrue(vpath.endswith("video-ic-x.mp4"))
         self.assertTrue(ppath.endswith("video-small-thumbnail-ic-x.jpg"))
 
+    def test_push_raises_on_adb_failure(self):
+        # A failed push must raise so no slideshow row points at a missing file.
+        class Failing(frame.Frame):
+            def _adb(inner, *args, text_input=None):
+                class R:
+                    returncode = 1
+                    stdout = ""
+                    stderr = "adb: error: failed to copy"
+                return R()
+        with self.assertRaises(RuntimeError):
+            Failing("h:5555").push_photo("/tmp/x.jpg", "ic-x")
+
     def test_insert_video_sets_type_and_thumbnail(self):
         self.frame.insert_asset("ic-x", "/p/video-ic-x.mp4", 720, 1280,
                                 asset_type="video",
                                 small_thumbnail="/p/video-small-thumbnail-ic-x.jpg")
-        sql = " ".join(self.calls[-1])
+        sql = self.sql_inputs[-1]
         self.assertIn("'video'", sql)                             # assetType column
         self.assertIn("video-small-thumbnail-ic-x.jpg", sql)     # smallThumbnail column
         self.assertIn("1280", sql)                               # height
@@ -217,7 +244,7 @@ class TestFrameSQL(unittest.TestCase):
 
     def test_insert_photo_defaults_unchanged(self):
         self.frame.insert_asset("ic-x", "/p/image-ic-x.jpg", 100, 200)
-        sql = " ".join(self.calls[-1])
+        sql = self.sql_inputs[-1]
         self.assertIn("'photo'", sql)                            # default assetType
         # smallThumbnail stays empty for photos: ...,'photo','',0,...
         self.assertIn("'photo','',", sql)
@@ -310,6 +337,20 @@ class TestSyncRefresh(unittest.TestCase):
         ins = calls["inserts"][0]
         self.assertEqual(ins["type"], "video")
         self.assertEqual(ins["thumb"], "")          # no poster pushed, smallThumbnail stays empty
+
+    def test_removes_asset_absent_from_nonempty_album(self):
+        # Normal deletion still works: g2 is on the frame but no longer in the album.
+        calls = self._run([self._photo("g1")],
+                          have_ids={sync._aid("g1"), sync._aid("g2")})
+        self.assertEqual(calls["removed"], [sync._aid("g2")])
+        self.assertEqual(calls["refresh"], 1)
+
+    def test_empty_album_does_not_wipe_frame(self):
+        # A fetch returning zero assets is treated as an anomaly, not a mass
+        # delete -- the frame's content is left intact and the app isn't kicked.
+        calls = self._run([], have_ids={sync._aid("g1"), sync._aid("g2")})
+        self.assertEqual(calls["removed"], [])
+        self.assertEqual(calls["refresh"], 0)
 
 
 class TestStatusHealth(unittest.TestCase):
