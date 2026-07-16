@@ -260,8 +260,10 @@ class TestSyncRefresh(unittest.TestCase):
     """The slideshow only reloads on restart, so a cycle that changes the photo
     set must kick the app -- and a no-op cycle must not (keep the screen steady)."""
 
-    def _run(self, album_assets, have_ids):
+    def _run(self, album_assets, have_ids, have_file_ids=None):
         calls = {"refresh": 0, "added": [], "removed": [], "inserts": []}
+        # Unless a test says otherwise, every DB row also has its file on disk.
+        file_ids = have_ids if have_file_ids is None else have_file_ids
 
         class FakeFrame:
             def connect(self):
@@ -269,6 +271,9 @@ class TestSyncRefresh(unittest.TestCase):
 
             def asset_ids(self, prefix=None):
                 return set(have_ids)
+
+            def media_asset_ids(self, prefix=None):
+                return set(file_ids)
 
             def push_photo(self, path, aid):
                 return f"/p/image-{aid}.jpg"
@@ -337,6 +342,14 @@ class TestSyncRefresh(unittest.TestCase):
         ins = calls["inserts"][0]
         self.assertEqual(ins["type"], "video")
         self.assertEqual(ins["thumb"], "")          # no poster pushed, smallThumbnail stays empty
+
+    def test_repushes_row_whose_file_vanished(self):
+        # A DB row survives but its media file was wiped (frame storage cleanup):
+        # the asset must be re-pushed and re-inserted, not assumed present.
+        calls = self._run([self._photo("g1")], have_ids={sync._aid("g1")},
+                          have_file_ids=set())
+        self.assertEqual(calls["added"], [sync._aid("g1")])
+        self.assertEqual(calls["refresh"], 1)
 
     def test_removes_asset_absent_from_nonempty_album(self):
         # Normal deletion still works: g2 is on the frame but no longer in the album.

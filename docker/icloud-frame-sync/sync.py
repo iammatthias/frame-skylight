@@ -96,7 +96,9 @@ def sync_once(frame, state):
     state.update(frame_reachable=True)
     album = fetch_album(ALBUM)
     want = {_aid(p["guid"]): p for p in album["assets"] if p["url"]}
-    have = frame.asset_ids(prefix=ID_PREFIX)
+    have_rows = frame.asset_ids(prefix=ID_PREFIX)
+    have_files = frame.media_asset_ids(prefix=ID_PREFIX)
+    have = have_rows & have_files          # "present" = DB row AND its media file
     kinds = Counter(p["kind"] for p in album["assets"])
     state.update(album=album["name"], album_count=len(album["assets"]),
                  album_photos=kinds.get("photo", 0), album_videos=kinds.get("video", 0))
@@ -104,8 +106,10 @@ def sync_once(frame, state):
 
     for aid, p in want.items():
         if aid in have:
-            continue  # already on the frame. NB: in-place album edits (same guid,
-                      # re-cropped) are not re-fetched -- id presence wins here.
+            continue  # row + file both present. A row whose file vanished is not
+                      # in `have`, so it gets re-pushed here (self-healing). NB:
+                      # in-place album edits (same guid, re-cropped) are not
+                      # re-fetched -- id presence wins here.
         if DRY_RUN:
             log(f"would add [{p['kind']}] {aid}  {p['width']}x{p['height']}  {p['filename']}")
             added += 1
@@ -117,7 +121,7 @@ def sync_once(frame, state):
         except Exception as e:
             log(f"! failed {aid}: {e}")
 
-    to_remove = have - set(want)
+    to_remove = have_rows - set(want)      # drop rows the album no longer has
     # Safety valve: a *successful* fetch returning zero assets is almost always an
     # API/token hiccup, not "the user emptied the album" -- removing then would
     # wipe (and re-download) the whole frame. Skip removals in that case; a

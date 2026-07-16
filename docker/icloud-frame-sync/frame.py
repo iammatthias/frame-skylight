@@ -37,16 +37,19 @@ class Frame:
                               input=text_input, capture_output=True, text=True)
 
     def connect(self, attempts=3, backoff=2.0):
-        # Network-adb drops are common (frame sleeps, wifi blips). Retry a few
-        # times before treating the frame as unreachable for this cycle.
+        # Network-adb drops are common (frame sleeps, wifi blips). `get-state` is
+        # not enough: it reports "device" for a half-open connection that then
+        # fails every real op ("connect failed: closed"). Verify with an actual
+        # shell round-trip and disconnect/retry until a command genuinely works,
+        # so a wedged connection self-recovers instead of silently no-op'ing.
         last = ""
         for i in range(attempts):
             subprocess.run(["adb", "connect", self.host], capture_output=True, text=True)
-            r = self._adb("get-state")
-            if "device" in r.stdout:
+            r = self._adb("shell", "echo", "ok")
+            if r.returncode == 0 and "ok" in r.stdout:
                 return
-            last = r.stdout.strip() or r.stderr.strip()
-            self._adb("disconnect")  # clear a half-open/offline entry before retrying
+            last = (r.stdout or r.stderr or "").strip()
+            self._adb("disconnect")  # clear the half-open/offline entry before retrying
             if i < attempts - 1:
                 time.sleep(backoff * (i + 1))
         raise RuntimeError(f"frame {self.host} not reachable via adb ({last})")
@@ -65,6 +68,19 @@ class Frame:
     def asset_ids(self, prefix=None):
         out = self.sql("SELECT serverAssetId FROM SlideshowAsset")
         ids = {x.strip() for x in out.splitlines() if x.strip()}
+        return {i for i in ids if i.startswith(prefix)} if prefix else ids
+
+    def media_asset_ids(self, prefix=None):
+        """Ids whose primary media FILE is actually on disk (image-<id>.jpg or
+        video-<id>.mp4). The sync reconciles against row ∩ file, so a row whose
+        file vanished (frame storage wiped, app cleanup) is re-pushed instead of
+        assumed present -- self-healing that a DB-only check would miss."""
+        out = self.shell(f"ls {PICDIR} 2>/dev/null")
+        ids = set()
+        for name in out.split():
+            for pat, suf in (("image-", ".jpg"), ("video-", ".mp4")):
+                if name.startswith(pat) and name.endswith(suf) and "thumbnail" not in name:
+                    ids.add(name[len(pat):-len(suf)])
         return {i for i in ids if i.startswith(prefix)} if prefix else ids
 
     def _push(self, local_path, remote_name):
