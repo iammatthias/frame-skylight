@@ -22,4 +22,24 @@ services:
       DRY_RUN: "${DRY_RUN:-}"                       # "1" to plan without writing
       STATUS_ADDR: "${STATUS_ADDR:-0.0.0.0}"
       STATUS_PORT: "${STATUS_PORT:-8780}"
+    # The adb client key identifies this host to the frame, which authorizes it
+    # once. It lives in ~/.android — the container's writable layer — so any
+    # `compose up` that recreates the container mints a NEW key and the frame
+    # stops trusting us until it re-authorizes. Keep it in a named volume so
+    # the identity survives a rebuild.
+    volumes:
+      - adb-key:/root/.android
+    # adb raises its own soft fd limit to whatever the hard limit allows, then
+    # fails every socketpair with EMFILE ("Too many open files") once that
+    # ceiling is large — which is what a modern container runtime hands out by
+    # default (524288 here). The symptom is `adb shell` failing instantly while
+    # `adb devices` still reports a healthy device, so it reads like a frame
+    # problem rather than an fd one. Pin a classic 1024 and adb behaves.
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 1024
     restart: unless-stopped
+
+volumes:
+  adb-key:
