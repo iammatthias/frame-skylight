@@ -22,11 +22,11 @@ services:
       DRY_RUN: "${DRY_RUN:-}"                       # "1" to plan without writing
       STATUS_ADDR: "${STATUS_ADDR:-0.0.0.0}"
       STATUS_PORT: "${STATUS_PORT:-8780}"
-    # The adb client key identifies this host to the frame, which authorizes it
-    # once. It lives in ~/.android — the container's writable layer — so any
-    # `compose up` that recreates the container mints a NEW key and the frame
-    # stops trusting us until it re-authorizes. Keep it in a named volume so
-    # the identity survives a rebuild.
+    # The adb client key identifies this host to the frame. It lives in
+    # ~/.android — the container's writable layer — so it is regenerated every
+    # time the container is recreated. The frame accepts a new key without
+    # prompting, so this is churn rather than a lockout, but a stable identity
+    # is the right behavior and costs one line.
     volumes:
       - adb-key:/root/.android
     # adb raises its own soft fd limit to whatever the hard limit allows, then
