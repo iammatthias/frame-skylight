@@ -256,6 +256,92 @@ class TestFrameSQL(unittest.TestCase):
         self.assertIn("monkey -p com.skylight", joined)    # relaunch into slideshow
 
 
+class TestFrameConnect(unittest.TestCase):
+    """connect() has to tell three failures apart: a healthy frame, a half-open
+    transport that a reconnect fixes, and an fd-exhausted adbd that only a daemon
+    restart fixes (reconnecting there loops forever -- it did, for four days)."""
+
+    def _frame(self, shell_results):
+        """A Frame whose shell round-trip returns `shell_results` in order. Every
+        adb invocation is recorded instead of run, and sleeps are skipped."""
+        calls = []
+        replies = list(shell_results)
+
+        class FakeFrame(frame.Frame):
+            def _adb(inner, *args, text_input=None):
+                calls.append(args)
+
+                class R:
+                    returncode, stdout, stderr = 0, "", ""
+
+                if args[0] == "shell":
+                    out, err = replies.pop(0)
+                    R.returncode = 0 if out else 1
+                    R.stdout, R.stderr = out, err
+                return R()
+
+            def _adb_raw(inner, *args):
+                calls.append(args)
+
+                class R:
+                    returncode, stdout, stderr = 0, "", ""
+
+                return R()
+
+            def _restart_adbd(inner, settle=0.0):
+                # Real restart sequence, minus the wait for adbd to come back.
+                return frame.Frame._restart_adbd(inner, settle=0.0)
+
+        return FakeFrame("1.2.3.4:5555"), calls
+
+    @staticmethod
+    def _flat(calls):
+        return [" ".join(str(a) for a in c) for c in calls]
+
+    def test_connects_when_shell_round_trip_works(self):
+        f, calls = self._frame([("ok\n", "")])
+        f.connect()
+        self.assertIn("connect 1.2.3.4:5555", self._flat(calls))
+        # A healthy frame must not be disconnected or have adbd bounced.
+        self.assertNotIn("tcpip 5555", self._flat(calls))
+        self.assertNotIn("disconnect", self._flat(calls))
+
+    def test_half_open_transport_reconnects_without_restarting_adbd(self):
+        # "closed" is a dead transport: disconnect + reconnect is the right fix,
+        # and bouncing adbd over it would be a needless hit to the frame.
+        f, calls = self._frame([("", "error: closed"), ("ok\n", "")])
+        f.connect(backoff=0)
+        flat = self._flat(calls)
+        self.assertIn("disconnect", flat)
+        self.assertNotIn("tcpip 5555", flat)
+
+    def test_fd_exhausted_adbd_is_restarted_and_recovers(self):
+        emfile = "error: failed to create socketpair to intercept data: Too many open files"
+        f, calls = self._frame([("", emfile), ("ok\n", "")])
+        f.connect(backoff=0)
+        flat = self._flat(calls)
+        # tcpip re-execs adbd on the port it already serves, clearing its fds.
+        self.assertIn("tcpip 5555", flat)
+        self.assertLess(flat.index("tcpip 5555"), len(flat) - 1)  # then reconnects
+
+    def test_adbd_restarted_at_most_once_per_connect(self):
+        emfile = "error: failed to create socketpair for stderr: Too many open files"
+        f, calls = self._frame([("", emfile)] * 3)
+        with self.assertRaises(RuntimeError):
+            f.connect(backoff=0)
+        # A failure that only looks like fd exhaustion must not become a restart
+        # loop hammering the frame every cycle.
+        self.assertEqual(self._flat(calls).count("tcpip 5555"), 1)
+
+    def test_gives_up_with_the_adbd_error_in_the_message(self):
+        emfile = "error: failed to create socketpair for stdin/out: Too many open files"
+        f, _ = self._frame([("", emfile)] * 3)
+        with self.assertRaises(RuntimeError) as cm:
+            f.connect(backoff=0)
+        # The operator needs the adbd text verbatim -- it names the real fault.
+        self.assertIn("Too many open files", str(cm.exception))
+
+
 class TestSyncRefresh(unittest.TestCase):
     """The slideshow only reloads on restart, so a cycle that changes the photo
     set must kick the app -- and a no-op cycle must not (keep the screen steady)."""

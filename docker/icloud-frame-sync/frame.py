@@ -23,6 +23,16 @@ MEDIA_NAMES = {
     "poster_full": "video-full-thumbnail-{id}.jpg",
 }
 
+# adbd on the frame leaks file descriptors and eventually reaches its own 1024
+# soft limit (about a month of syncing). Past that the transport still works --
+# `adb connect` and `adb devices` both report a healthy device -- but adbd can no
+# longer fork a shell, so every real command dies in socketpair() with EMFILE.
+# The message is printed by adbd, not by our adb client, and reads as an fd
+# problem on this side; it is not. Reconnecting cannot fix it because the
+# descriptors belong to the daemon, not the connection -- only restarting adbd
+# frees them.
+ADBD_OUT_OF_FDS = "too many open files"
+
 
 def _esc(s):
     return s.replace("'", "''")
@@ -36,6 +46,23 @@ class Frame:
         return subprocess.run(["adb", "-s", self.host, *args],
                               input=text_input, capture_output=True, text=True)
 
+    def _adb_raw(self, *args):
+        """adb with no device selected -- `connect` takes the endpoint as an
+        argument rather than via -s, and runs before any transport exists."""
+        return subprocess.run(["adb", *args], capture_output=True, text=True)
+
+    def _restart_adbd(self, settle=10.0):
+        """Restart adbd on the frame so it drops its leaked descriptors.
+
+        `adb tcpip <port>` re-execs adbd listening on the port it is already on,
+        which is the only remote lever that resets its fd table short of
+        rebooting the frame. The transport dies with the daemon, so clear the
+        stale entry and let adbd come back before the caller reconnects."""
+        port = self.host.rsplit(":", 1)[1] if ":" in self.host else "5555"
+        self._adb("tcpip", port)
+        self._adb("disconnect")
+        time.sleep(settle)
+
     def connect(self, attempts=3, backoff=2.0):
         # Network-adb drops are common (frame sleeps, wifi blips). `get-state` is
         # not enough: it reports "device" for a half-open connection that then
@@ -43,13 +70,23 @@ class Frame:
         # shell round-trip and disconnect/retry until a command genuinely works,
         # so a wedged connection self-recovers instead of silently no-op'ing.
         last = ""
+        restarted = False
         for i in range(attempts):
-            subprocess.run(["adb", "connect", self.host], capture_output=True, text=True)
+            self._adb_raw("connect", self.host)
             r = self._adb("shell", "echo", "ok")
             if r.returncode == 0 and "ok" in r.stdout:
                 return
             last = (r.stdout or r.stderr or "").strip()
-            self._adb("disconnect")  # clear the half-open/offline entry before retrying
+            # An fd-exhausted adbd answers every connect happily and every shell
+            # with EMFILE, so the disconnect/retry above would spin here forever
+            # (it did, for four days). Restart the daemon instead -- once per
+            # call, so a failure that merely looks like this can't turn into a
+            # restart loop against the frame.
+            if ADBD_OUT_OF_FDS in last.lower() and not restarted:
+                restarted = True
+                self._restart_adbd()
+            else:
+                self._adb("disconnect")  # clear the half-open/offline entry
             if i < attempts - 1:
                 time.sleep(backoff * (i + 1))
         raise RuntimeError(f"frame {self.host} not reachable via adb ({last})")

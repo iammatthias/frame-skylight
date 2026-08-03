@@ -35,6 +35,9 @@ services:
     # default (524288 here). The symptom is `adb shell` failing instantly while
     # `adb devices` still reports a healthy device, so it reads like a frame
     # problem rather than an fd one. Pin a classic 1024 and adb behaves.
+    # NB: adbd on the frame hits its own 1024-fd limit with the same wording, and
+    # this cap does nothing for that one — see connect() in frame.py, which
+    # restarts adbd, and the troubleshooting note in docs/frame.md.
     ulimits:
       nofile:
         soft: 1024

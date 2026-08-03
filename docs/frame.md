@@ -35,6 +35,18 @@ Everything below is persistent on the frame itself; the sync service
   recurrence).
 - **`device offline`** — usually two ADB masters fighting for the frame. Only one
   syncer should run. If it persists, reboot the frame's ADB / power-cycle it.
+- **`failed to create socketpair ...: Too many open files`** — `adbd` on the
+  frame has leaked its way to its own 1024-fd soft limit (took ~29 days of
+  5-minute syncing last time). Read the message on the right side: it is printed
+  by `adbd`, so the exhausted process is on the *frame*, not in the container —
+  `adb connect` and `adb devices` still report a healthy device, and only the
+  commands that need `adbd` to fork a shell fail. Reconnecting never fixes it;
+  restart the daemon:
+  ```
+  docker exec skylight-icloud-sync adb -s <frame> tcpip 5555
+  ```
+  `connect()` now does this automatically (once per cycle), so this should only
+  ever be a manual step if that recovery itself fails.
 - **Frame IP changed** — update `FRAME_HOST` in `.env` and
   `docker compose up -d`. Fix permanently with a DHCP reservation.
 - **Slideshow shows a setup/error screen** (not photos) — the cloud block is too
